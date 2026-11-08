@@ -507,6 +507,28 @@ jobs:
               }) { content() }
           }
 
+          @Composable
+          fun Pop(animate: Boolean, delayMs: Long = 0L, slideX: Float = 0f, slideY: Float = 0f,
+                  originX: Float = 0.5f, startScale: Float = 1f, content: @Composable () -> Unit) {
+              val p = remember { Animatable(if (animate) 0f else 1f) }
+              LaunchedEffect(Unit) {
+                  if (animate) {
+                      delay(delayMs)
+                      p.animateTo(1f, tween(320, easing = FastOutSlowInEasing))
+                  }
+              }
+              Box(Modifier.graphicsLayer {
+                  val v = p.value
+                  alpha = v
+                  translationX = (1f - v) * slideX
+                  translationY = (1f - v) * slideY
+                  val sc = startScale + (1f - startScale) * v
+                  scaleX = sc
+                  scaleY = sc
+                  transformOrigin = TransformOrigin(originX, 1f)
+              }) { content() }
+          }
+
           // ---------- App ----------
           class MainActivity : ComponentActivity() {
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -667,9 +689,7 @@ jobs:
                   Spacer(Modifier.height(6.dp))
                   LazyColumn {
                       itemsIndexed(rooms, key = { _, r -> r.id }) { index, r ->
-                          var shown by remember { mutableStateOf(false) }
-                          LaunchedEffect(Unit) { delay(minOf(index, 8) * 60L); shown = true }
-                          AnimatedVisibility(shown, enter = fadeIn(tween(350)) + slideInHorizontally(tween(350)) { it / 4 }) {
+                          Pop(true, minOf(index, 8) * 60L, slideX = 100f) {
                               GlassCard(Modifier.fillMaxWidth().padding(vertical = 5.dp), onClick = { onOpen(r) }) {
                                   Avatar(r.title, 48.dp, if (r.isGroup) "\uD83D\uDC65" else null)
                                   Spacer(Modifier.width(14.dp))
@@ -820,13 +840,8 @@ jobs:
                           items(msgs, key = { it.id }) { m ->
                               val mine = m.senderId == session.uid
                               val animate = remember { m.id !in seen }
-                              var shown by remember { mutableStateOf(!animate) }
-                              LaunchedEffect(Unit) { shown = true; seen.add(m.id) }
-                              AnimatedVisibility(
-                                  visible = shown,
-                                  enter = fadeIn(tween(250)) + slideInVertically(tween(300)) { it / 2 } +
-                                      scaleIn(tween(300), initialScale = 0.85f, transformOrigin = TransformOrigin(if (mine) 1f else 0f, 1f))
-                              ) {
+                              LaunchedEffect(Unit) { seen.add(m.id) }
+                              Pop(animate, 0L, slideY = 60f, originX = if (mine) 1f else 0f, startScale = 0.85f) {
                                   Row(
                                       Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                       horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
