@@ -1,4 +1,4 @@
-name: Build FriendChat
+name: Build justussss
 
 on:
   push:
@@ -151,7 +151,6 @@ jobs:
           import androidx.compose.animation.core.FastOutSlowInEasing
           import androidx.compose.animation.core.LinearEasing
           import androidx.compose.animation.core.RepeatMode
-          import androidx.compose.animation.core.animateFloat
           import androidx.compose.animation.core.animateFloatAsState
           import androidx.compose.animation.core.infiniteRepeatable
           import androidx.compose.animation.core.rememberInfiniteTransition
@@ -213,15 +212,35 @@ jobs:
           import java.time.ZoneId
           import java.time.format.DateTimeFormatter
 
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.text.font.FontStyle
+          import androidx.compose.ui.text.style.TextOverflow
           object Cfg {
               const val BASE = "https://dztdwzbbotkurqoqjhro.supabase.co"
               const val KEY = "sb_publishable_YcML1iEjJ-oVfYZDt6lGog_W4qpQxLC"
           }
 
+          object AppState {
+              var fg by mutableStateOf(true)
+          }
+
           class ApiException(msg: String) : Exception(msg)
 
-          data class Room(val id: String, val title: String, val isGroup: Boolean)
-          data class Msg(val id: Long, val senderId: String, val sender: String, val body: String?, val image: String?, val at: String)
+          data class Room(
+              val id: String, val title: String, val isGroup: Boolean,
+              val lastBody: String?, val lastImage: Boolean, val lastDeleted: Boolean,
+              val lastAt: String?, val lastSender: String?, val unread: Int,
+              val otherId: String?, val otherAvatar: String?, val otherSeen: String?
+          )
+          data class Msg(
+              val id: Long, val senderId: String, val sender: String, val body: String?,
+              val image: String?, val at: String, val replyTo: Long?, val deleted: Boolean
+          )
+          data class Profile(val id: String, val name: String, val avatar: String?, val seen: String?)
+          data class Reaction(val messageId: Long, val userId: String, val emoji: String)
+
+          private fun JSONObject.str(k: String): String? = if (isNull(k)) null else getString(k)
 
           class Session(ctx: Context) {
               private val p = ctx.getSharedPreferences("session", Context.MODE_PRIVATE)
@@ -326,30 +345,74 @@ jobs:
                   val arr = JSONArray(authed("POST", "/rest/v1/rpc/my_rooms", "{}"))
                   return (0 until arr.length()).map {
                       val o = arr.getJSONObject(it)
-                      Room(o.getString("id"), if (o.isNull("title")) "Chat" else o.getString("title"), o.getBoolean("is_group"))
+                      Room(
+                          o.getString("id"), o.str("title") ?: "Chat", o.getBoolean("is_group"),
+                          o.str("last_body"), o.optBoolean("last_image", false), o.optBoolean("last_deleted", false),
+                          o.str("last_at"), o.str("last_sender"), o.optInt("unread", 0),
+                          o.str("other_id"), o.str("other_avatar"), o.str("other_seen")
+                      )
                   }
+              }
+
+              fun profiles(): Map<String, Profile> {
+                  val arr = JSONArray(authed("GET", "/rest/v1/profiles?select=id,username,avatar_url,last_seen"))
+                  val out = HashMap<String, Profile>()
+                  for (i in 0 until arr.length()) {
+                      val o = arr.getJSONObject(i)
+                      out[o.getString("id")] = Profile(o.getString("id"), o.getString("username"), o.str("avatar_url"), o.str("last_seen"))
+                  }
+                  return out
               }
 
               fun messages(roomId: String): List<Msg> {
                   val q = "/rest/v1/messages?room_id=eq.$roomId&order=created_at.desc&limit=200" +
-                      "&select=id,sender_id,sender_name,body,image_url,created_at"
+                      "&select=id,sender_id,sender_name,body,image_url,created_at,reply_to,deleted"
                   val arr = JSONArray(authed("GET", q))
                   return (0 until arr.length()).map {
                       val o = arr.getJSONObject(it)
                       Msg(
                           o.getLong("id"), o.getString("sender_id"), o.getString("sender_name"),
-                          if (o.isNull("body")) null else o.getString("body"),
-                          if (o.isNull("image_url")) null else o.getString("image_url"),
-                          o.getString("created_at")
+                          o.str("body"), o.str("image_url"), o.getString("created_at"),
+                          if (o.isNull("reply_to")) null else o.getLong("reply_to"),
+                          o.optBoolean("deleted", false)
                       )
                   }.reversed()
               }
 
-              fun send(roomId: String, name: String, body: String?, image: String?) {
+              fun reactions(roomId: String): List<Reaction> {
+                  val arr = JSONArray(authed("POST", "/rest/v1/rpc/room_reactions", JSONObject().put("rid", roomId).toString()))
+                  return (0 until arr.length()).map {
+                      val o = arr.getJSONObject(it)
+                      Reaction(o.getLong("message_id"), o.getString("user_id"), o.getString("emoji"))
+                  }
+              }
+
+              fun send(roomId: String, name: String, body: String?, image: String?, replyTo: Long? = null) {
                   val j = JSONObject().put("room_id", roomId).put("sender_name", name)
                   if (body != null) j.put("body", body)
                   if (image != null) j.put("image_url", image)
+                  if (replyTo != null) j.put("reply_to", replyTo)
                   authed("POST", "/rest/v1/messages", j.toString())
+              }
+
+              fun react(messageId: Long, emoji: String) {
+                  authed("POST", "/rest/v1/rpc/react", JSONObject().put("mid", messageId).put("e", emoji).toString())
+              }
+
+              fun deleteMessage(messageId: Long) {
+                  authed("POST", "/rest/v1/rpc/delete_message", JSONObject().put("mid", messageId).toString())
+              }
+
+              fun markRead(roomId: String) {
+                  authed("POST", "/rest/v1/rpc/mark_read", JSONObject().put("rid", roomId).toString())
+              }
+
+              fun touch() {
+                  authed("POST", "/rest/v1/rpc/touch_seen", "{}")
+              }
+
+              fun setAvatar(url: String) {
+                  authed("POST", "/rest/v1/rpc/set_avatar", JSONObject().put("u", url).toString())
               }
 
               fun startDm(username: String): String {
@@ -369,11 +432,11 @@ jobs:
               }
           }
 
-          fun compressPhoto(ctx: Context, uri: Uri): ByteArray {
+          fun compressPhoto(ctx: Context, uri: Uri, max: Int = 1280): ByteArray {
               val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
               ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
               var sample = 1
-              while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
+              while (bounds.outWidth / sample > max || bounds.outHeight / sample > max) sample *= 2
               val opts = BitmapFactory.Options().apply { inSampleSize = sample }
               val bmp = ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
                   ?: throw ApiException("Could not read photo")
@@ -391,6 +454,40 @@ jobs:
               return out.toByteArray()
           }
 
+          // ---------- time helpers ----------
+          fun hhmm(iso: String): String = try {
+              OffsetDateTime.parse(iso).atZoneSameInstant(ZoneId.systemDefault())
+                  .format(DateTimeFormatter.ofPattern("HH:mm"))
+          } catch (e: Exception) { "" }
+
+          fun shortTime(iso: String?): String = try {
+              if (iso == null) "" else {
+                  val z = OffsetDateTime.parse(iso).atZoneSameInstant(ZoneId.systemDefault())
+                  if (z.toLocalDate() == java.time.LocalDate.now()) z.format(DateTimeFormatter.ofPattern("HH:mm"))
+                  else z.format(DateTimeFormatter.ofPattern("d MMM"))
+              }
+          } catch (e: Exception) { "" }
+
+          fun isOnline(seen: String?): Boolean = try {
+              seen != null && java.time.Duration.between(OffsetDateTime.parse(seen), OffsetDateTime.now()).seconds < 75
+          } catch (e: Exception) { false }
+
+          fun lastSeenText(seen: String?): String {
+              if (seen == null) return "offline"
+              if (isOnline(seen)) return "online"
+              return "last seen " + shortTime(seen).let { t ->
+                  try {
+                      val z = OffsetDateTime.parse(seen).atZoneSameInstant(ZoneId.systemDefault())
+                      if (z.toLocalDate() == java.time.LocalDate.now()) hhmm(seen) else t + ", " + hhmm(seen)
+                  } catch (e: Exception) { t }
+              }
+          }
+
+          fun previewOf(m: Msg?): String =
+              if (m == null) "Original message"
+              else if (m.deleted) "Message deleted"
+              else if (m.image != null && m.body.isNullOrEmpty()) "\uD83D\uDCF7 Photo"
+              else m.body ?: ""
 
           // ---------- Look & feel ----------
           private val Bg1 = Color(0xFF0F0C29)
@@ -401,13 +498,13 @@ jobs:
           private val Glass = Color(0x1AFFFFFF)
           private val GlassEdge = Color(0x33FFFFFF)
           private val Soft = Color(0xFFB7B3D6)
+          private val Danger = Color(0xFFFF8A9B)
+          private val Green = Color(0xFF3DDC84)
+
+          private val HEART = "\u2764\uFE0F"
+          private val EMOJIS = listOf(HEART, "\uD83D\uDC4D", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22", "\uD83D\uDD25")
 
           private val imgCache = HashMap<String, Bitmap>()
-
-          fun hhmm(iso: String): String = try {
-              OffsetDateTime.parse(iso).atZoneSameInstant(ZoneId.systemDefault())
-                  .format(DateTimeFormatter.ofPattern("HH:mm"))
-          } catch (e: Exception) { "" }
 
           @Composable
           fun RemoteImage(url: String, modifier: Modifier, scale: ContentScale = ContentScale.Crop) {
@@ -417,7 +514,7 @@ jobs:
                           try {
                               val b = URL(url).openStream().use { BitmapFactory.decodeStream(it) }
                               if (b != null) {
-                                  if (imgCache.size > 30) imgCache.clear()
+                                  if (imgCache.size > 60) imgCache.clear()
                                   imgCache[url] = b
                               }
                               b
@@ -438,7 +535,7 @@ jobs:
           }
 
           @Composable
-          fun Avatar(name: String, size: Dp, emoji: String? = null) {
+          fun Avatar(name: String, size: Dp, emoji: String? = null, url: String? = null, online: Boolean = false) {
               val pairs = listOf(
                   Pair(Color(0xFF8E7CFF), Color(0xFF5B8DEF)),
                   Pair(Color(0xFFFF6FD8), Color(0xFFFF9A8B)),
@@ -447,12 +544,24 @@ jobs:
                   Pair(Color(0xFF4FACFE), Color(0xFF00C2EE))
               )
               val p = pairs[(name.lowercase().hashCode() and 0x7fffffff) % pairs.size]
-              Box(
-                  Modifier.size(size).clip(CircleShape).background(Brush.linearGradient(listOf(p.first, p.second))),
-                  contentAlignment = Alignment.Center
-              ) {
-                  val label = emoji ?: name.trim().take(1).uppercase().ifEmpty { "?" }
-                  Text(label, color = Color.White, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.42f).sp)
+              Box(Modifier.size(size)) {
+                  Box(
+                      Modifier.fillMaxSize().clip(CircleShape).background(Brush.linearGradient(listOf(p.first, p.second))),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      if (!url.isNullOrEmpty()) {
+                          RemoteImage(url, Modifier.fillMaxSize())
+                      } else {
+                          val label = emoji ?: name.trim().take(1).uppercase().ifEmpty { "?" }
+                          Text(label, color = Color.White, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.42f).sp)
+                      }
+                  }
+                  if (online) {
+                      Box(
+                          Modifier.size(size * 0.3f).align(Alignment.BottomEnd).clip(CircleShape)
+                              .background(Color(0xFF1E1B3A)).padding(2.dp).clip(CircleShape).background(Green)
+                      )
+                  }
               }
           }
 
@@ -529,12 +638,44 @@ jobs:
               }) { content() }
           }
 
+          @Composable
+          fun ReactionRow(rx: List<Reaction>, myId: String, onTap: (String) -> Unit) {
+              val groups = rx.groupBy { it.emoji }
+              Row(Modifier.padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  groups.forEach { (e, list) ->
+                      val mine = list.any { it.userId == myId }
+                      Row(
+                          Modifier.clip(RoundedCornerShape(50))
+                              .background(if (mine) Color(0x558E7CFF) else Glass)
+                              .border(1.dp, if (mine) Accent else GlassEdge, RoundedCornerShape(50))
+                              .clickable { onTap(e) }
+                              .padding(horizontal = 8.dp, vertical = 2.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Text(e, fontSize = 13.sp)
+                          if (list.size > 1) {
+                              Spacer(Modifier.width(3.dp))
+                              Text("${list.size}", fontSize = 12.sp, color = Soft)
+                          }
+                      }
+                  }
+              }
+          }
+
           // ---------- App ----------
           class MainActivity : ComponentActivity() {
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   val session = Session(this)
                   setContent { App(session) }
+              }
+              override fun onStart() {
+                  super.onStart()
+                  AppState.fg = true
+              }
+              override fun onStop() {
+                  AppState.fg = false
+                  super.onStop()
               }
           }
 
@@ -543,6 +684,16 @@ jobs:
               val api = remember { Api(session) }
               var loggedIn by remember { mutableStateOf(session.loggedIn) }
               var room by remember { mutableStateOf<Room?>(null) }
+
+              LaunchedEffect(loggedIn, AppState.fg) {
+                  if (loggedIn && AppState.fg) {
+                      while (true) {
+                          try { withContext(Dispatchers.IO) { api.touch() } } catch (e: Exception) { }
+                          delay(30000)
+                      }
+                  }
+              }
+
               MaterialTheme(
                   colorScheme = darkColorScheme(
                       primary = Accent, onPrimary = Color.White, background = Bg1, surface = Bg1,
@@ -650,7 +801,7 @@ jobs:
                       Text(if (signUp) "I already have an account" else "New here? Create account", color = Accent)
                   }
                   AnimatedVisibility(error.isNotEmpty()) {
-                      Text(error, color = Color(0xFFFF8A9B))
+                      Text(error, color = Danger)
                   }
               }
           }
@@ -660,48 +811,126 @@ jobs:
               var rooms by remember { mutableStateOf<List<Room>>(emptyList()) }
               var error by remember { mutableStateOf("") }
               var showNew by remember { mutableStateOf(false) }
+              var showProfile by remember { mutableStateOf(false) }
+              var myAvatar by remember { mutableStateOf<String?>(null) }
+              var photoBusy by remember { mutableStateOf(false) }
+              var photoErr by remember { mutableStateOf("") }
               var tick by remember { mutableStateOf(0) }
               val scope = rememberCoroutineScope()
+              val ctx = androidx.compose.ui.platform.LocalContext.current
+
+              val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                  if (uri != null) scope.launch {
+                      photoBusy = true
+                      photoErr = ""
+                      try {
+                          val url = withContext(Dispatchers.IO) {
+                              val u = api.uploadPhoto(compressPhoto(ctx, uri, 512))
+                              api.setAvatar(u)
+                              u
+                          }
+                          myAvatar = url
+                      } catch (e: Exception) { photoErr = e.message ?: "Upload failed" }
+                      photoBusy = false
+                  }
+              }
 
               LaunchedEffect(tick) {
                   while (true) {
-                      try {
-                          rooms = withContext(Dispatchers.IO) { api.rooms() }
-                          error = ""
-                      } catch (e: Exception) { error = e.message ?: "Network error" }
-                      delay(5000)
+                      if (AppState.fg) {
+                          try {
+                              val r = withContext(Dispatchers.IO) { api.rooms() }
+                              if (r != rooms) rooms = r
+                              val p = withContext(Dispatchers.IO) { api.profiles() }
+                              myAvatar = p[session.uid]?.avatar
+                              error = ""
+                          } catch (e: Exception) { error = e.message ?: "Network error" }
+                      }
+                      delay(4000)
                   }
               }
 
               Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp)) {
                   Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                      Box(Modifier.clip(CircleShape).clickable { showProfile = true }) {
+                          Avatar(session.name, 50.dp, url = myAvatar)
+                      }
+                      Spacer(Modifier.width(12.dp))
                       Column(Modifier.weight(1f)) {
                           Text("Chats", style = TextStyle(
                               brush = Brush.horizontalGradient(listOf(Accent, Pink)),
-                              fontSize = 32.sp, fontWeight = FontWeight.ExtraBold))
+                              fontSize = 30.sp, fontWeight = FontWeight.ExtraBold))
                           Text("Hi, ${session.name}", color = Soft)
                       }
                       GradientButton("+ New") { showNew = true }
                   }
-                  TextButton(onLogout) { Text("Log out", color = Soft) }
-                  AnimatedVisibility(error.isNotEmpty()) { Text(error, color = Color(0xFFFF8A9B)) }
-                  if (rooms.isEmpty() && error.isEmpty()) Text("Loading...", color = Soft)
-                  Spacer(Modifier.height(6.dp))
+                  AnimatedVisibility(error.isNotEmpty()) { Text(error, color = Danger) }
+                  if (rooms.isEmpty() && error.isEmpty()) Text("Loading...", color = Soft, modifier = Modifier.padding(top = 12.dp))
+                  Spacer(Modifier.height(10.dp))
                   LazyColumn {
                       itemsIndexed(rooms, key = { _, r -> r.id }) { index, r ->
                           Pop(true, minOf(index, 8) * 60L, slideX = 100f) {
                               GlassCard(Modifier.fillMaxWidth().padding(vertical = 5.dp), onClick = { onOpen(r) }) {
-                                  Avatar(r.title, 48.dp, if (r.isGroup) "\uD83D\uDC65" else null)
+                                  Avatar(r.title, 52.dp, if (r.isGroup) "\uD83D\uDC65" else null, r.otherAvatar,
+                                      online = !r.isGroup && isOnline(r.otherSeen))
                                   Spacer(Modifier.width(14.dp))
+                                  val who = if (r.lastSender == session.name) "You: "
+                                            else if (r.isGroup && r.lastSender != null) r.lastSender + ": " else ""
+                                  val sub = if (r.lastAt == null) "No messages yet"
+                                            else if (r.lastDeleted) "\uD83D\uDEAB Message deleted"
+                                            else if (r.lastImage && r.lastBody.isNullOrEmpty()) who + "\uD83D\uDCF7 Photo"
+                                            else who + (r.lastBody ?: "")
                                   Column(Modifier.weight(1f)) {
-                                      Text(r.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                                      Text(if (r.isGroup) "Group chat" else "Private chat", color = Soft, fontSize = 13.sp)
+                                      Text(r.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis)
+                                      Text(sub, color = if (r.unread > 0) Color.White else Soft, fontSize = 13.sp,
+                                          fontWeight = if (r.unread > 0) FontWeight.SemiBold else FontWeight.Normal,
+                                          maxLines = 1, overflow = TextOverflow.Ellipsis)
                                   }
-                                  Text("\u203A", fontSize = 26.sp, color = Soft)
+                                  Spacer(Modifier.width(8.dp))
+                                  Column(horizontalAlignment = Alignment.End) {
+                                      Text(shortTime(r.lastAt), fontSize = 11.sp, color = if (r.unread > 0) Accent else Soft)
+                                      if (r.unread > 0) {
+                                          Spacer(Modifier.height(4.dp))
+                                          Box(
+                                              Modifier.clip(CircleShape)
+                                                  .background(Brush.linearGradient(listOf(Accent, Pink)))
+                                                  .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
+                                                  .padding(horizontal = 6.dp),
+                                              contentAlignment = Alignment.Center
+                                          ) {
+                                              Text(if (r.unread > 99) "99+" else "${r.unread}", fontSize = 12.sp,
+                                                  color = Color.White, fontWeight = FontWeight.Bold)
+                                          }
+                                      }
+                                  }
                               }
                           }
                       }
                   }
+              }
+
+              if (showProfile) {
+                  AlertDialog(
+                      onDismissRequest = { showProfile = false },
+                      containerColor = Color(0xFF1E1B3A),
+                      shape = RoundedCornerShape(24.dp),
+                      title = { Text("Your profile") },
+                      text = {
+                          Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                              Avatar(session.name, 110.dp, url = myAvatar)
+                              Spacer(Modifier.height(10.dp))
+                              Text(session.name, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                              Spacer(Modifier.height(14.dp))
+                              GradientButton(if (photoBusy) "Uploading..." else "Change photo", enabled = !photoBusy) {
+                                  avatarPicker.launch("image/*")
+                              }
+                              if (photoErr.isNotEmpty()) Text(photoErr, color = Danger)
+                              TextButton({ showProfile = false; onLogout() }) { Text("Log out", color = Danger) }
+                          }
+                      },
+                      confirmButton = { TextButton({ showProfile = false }) { Text("Done", color = Accent) } }
+                  )
               }
 
               if (showNew) {
@@ -733,7 +962,7 @@ jobs:
                                   OutlinedTextField(users, { users = it }, label = { Text("Friend's username") }, singleLine = true,
                                       shape = RoundedCornerShape(14.dp), colors = fieldColors())
                               }
-                              if (err.isNotEmpty()) Text(err, color = Color(0xFFFF8A9B))
+                              if (err.isNotEmpty()) Text(err, color = Danger)
                           }
                       },
                       confirmButton = {
@@ -762,11 +991,16 @@ jobs:
           @Composable
           fun ChatScreen(api: Api, session: Session, room: Room, onBack: () -> Unit) {
               var msgs by remember { mutableStateOf<List<Msg>>(emptyList()) }
+              var reactions by remember { mutableStateOf<List<Reaction>>(emptyList()) }
+              var profiles by remember { mutableStateOf<Map<String, Profile>>(emptyMap()) }
               var text by remember { mutableStateOf("") }
               var error by remember { mutableStateOf("") }
               var sending by remember { mutableStateOf(false) }
               var viewer by remember { mutableStateOf<String?>(null) }
+              var menuMsg by remember { mutableStateOf<Msg?>(null) }
+              var replyTo by remember { mutableStateOf<Msg?>(null) }
               var loaded by remember(room.id) { mutableStateOf(false) }
+              var lastRead by remember(room.id) { mutableStateOf<Long?>(null) }
               val seen = remember(room.id) { mutableSetOf<Long>() }
               val scope = rememberCoroutineScope()
               val listState = rememberLazyListState()
@@ -774,15 +1008,45 @@ jobs:
               BackHandler { if (viewer != null) viewer = null else onBack() }
 
               suspend fun refresh() {
-                  val m = withContext(Dispatchers.IO) { api.messages(room.id) }
+                  val pair = withContext(Dispatchers.IO) { Pair(api.messages(room.id), api.reactions(room.id)) }
+                  val m = pair.first
+                  val rx = pair.second
                   if (!loaded) { seen.addAll(m.map { it.id }); loaded = true }
                   if (m != msgs) msgs = m
+                  if (rx != reactions) reactions = rx
+                  val last = m.lastOrNull()?.id
+                  if (last != null && last != lastRead) {
+                      lastRead = last
+                      withContext(Dispatchers.IO) { try { api.markRead(room.id) } catch (e: Exception) { } }
+                  }
+              }
+
+              fun react(m: Msg, e: String) {
+                  scope.launch {
+                      try {
+                          withContext(Dispatchers.IO) { api.react(m.id, e) }
+                          refresh()
+                      } catch (ex: Exception) { error = ex.message ?: "Failed" }
+                  }
               }
 
               LaunchedEffect(room.id) {
                   while (true) {
-                      try { refresh(); error = "" } catch (e: Exception) { error = e.message ?: "Network error" }
+                      if (AppState.fg) {
+                          try { refresh(); error = "" } catch (e: Exception) { error = e.message ?: "Network error" }
+                      }
                       delay(2000)
+                  }
+              }
+              LaunchedEffect(room.id) {
+                  while (true) {
+                      if (AppState.fg) {
+                          try {
+                              val p = withContext(Dispatchers.IO) { api.profiles() }
+                              if (p != profiles) profiles = p
+                          } catch (e: Exception) { }
+                      }
+                      delay(8000)
                   }
               }
               var firstScroll by remember { mutableStateOf(true) }
@@ -796,19 +1060,23 @@ jobs:
               val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                   if (uri != null) scope.launch {
                       sending = true
+                      val rt = replyTo?.id
                       try {
                           withContext(Dispatchers.IO) {
                               val url = api.uploadPhoto(compressPhoto(ctx, uri))
-                              api.send(room.id, session.name, null, url)
+                              api.send(room.id, session.name, null, url, rt)
                           }
+                          replyTo = null
                           refresh()
                       } catch (e: Exception) { error = e.message ?: "Photo failed" }
                       sending = false
                   }
               }
 
+              val other = room.otherId?.let { profiles[it] }
+              val otherOnline = !room.isGroup && isOnline(other?.seen)
+
               Column(Modifier.fillMaxSize()) {
-                  // header
                   Row(
                       Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
                       verticalAlignment = Alignment.CenterVertically
@@ -818,15 +1086,19 @@ jobs:
                           contentAlignment = Alignment.Center
                       ) { Text("\u2039", fontSize = 26.sp) }
                       Spacer(Modifier.width(10.dp))
-                      Avatar(room.title, 42.dp, if (room.isGroup) "\uD83D\uDC65" else null)
+                      Avatar(room.title, 44.dp, if (room.isGroup) "\uD83D\uDC65" else null,
+                          other?.avatar ?: room.otherAvatar, online = otherOnline)
                       Spacer(Modifier.width(10.dp))
                       Column {
                           Text(room.title, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                          Text(if (room.isGroup) "Group chat" else "Private chat", color = Soft, fontSize = 12.sp)
+                          val sub = if (room.isGroup) "Group chat"
+                                    else if (profiles.isEmpty()) ""
+                                    else lastSeenText(other?.seen)
+                          Text(sub, color = if (otherOnline) Green else Soft, fontSize = 12.sp)
                       }
                   }
                   AnimatedVisibility(error.isNotEmpty()) {
-                      Text(error, color = Color(0xFFFF8A9B), modifier = Modifier.padding(horizontal = 14.dp))
+                      Text(error, color = Danger, modifier = Modifier.padding(horizontal = 14.dp))
                   }
 
                   Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -841,30 +1113,59 @@ jobs:
                               val mine = m.senderId == session.uid
                               val animate = remember { m.id !in seen }
                               LaunchedEffect(Unit) { seen.add(m.id) }
+                              val rx = reactions.filter { it.messageId == m.id }
                               Pop(animate, 0L, slideY = 60f, originX = if (mine) 1f else 0f, startScale = 0.85f) {
                                   Row(
                                       Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                       horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
                                       verticalAlignment = Alignment.Bottom
                                   ) {
-                                      if (!mine) { Avatar(m.sender, 30.dp); Spacer(Modifier.width(6.dp)) }
-                                      val shape = if (mine) RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
-                                                  else RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp)
-                                      Column(
-                                          Modifier.widthIn(max = 270.dp).clip(shape)
-                                              .background(if (mine) Brush.linearGradient(listOf(Color(0xFF7F5BFF), Color(0xFFD65BFF)))
-                                                          else Brush.linearGradient(listOf(Color(0x26FFFFFF), Color(0x26FFFFFF))))
-                                              .padding(horizontal = 12.dp, vertical = 8.dp)
-                                      ) {
-                                          if (!mine) Text(m.sender, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Accent)
-                                          if (m.image != null) {
-                                              RemoteImage(m.image, Modifier.size(220.dp).clip(RoundedCornerShape(12.dp))
-                                                  .clickable { viewer = m.image })
-                                              Spacer(Modifier.height(4.dp))
+                                      if (!mine) {
+                                          Avatar(m.sender, 30.dp, url = profiles[m.senderId]?.avatar)
+                                          Spacer(Modifier.width(6.dp))
+                                      }
+                                      Column(horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
+                                          val shape = if (mine) RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
+                                                      else RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp)
+                                          Column(
+                                              Modifier.widthIn(max = 270.dp).clip(shape)
+                                                  .background(if (mine) Brush.linearGradient(listOf(Color(0xFF7F5BFF), Color(0xFFD65BFF)))
+                                                              else Brush.linearGradient(listOf(Color(0x26FFFFFF), Color(0x26FFFFFF))))
+                                                  .pointerInput(m) {
+                                                      detectTapGestures(
+                                                          onTap = { if (m.image != null) viewer = m.image },
+                                                          onDoubleTap = { if (!m.deleted) react(m, HEART) },
+                                                          onLongPress = { if (!m.deleted) menuMsg = m }
+                                                      )
+                                                  }
+                                                  .padding(horizontal = 12.dp, vertical = 8.dp)
+                                          ) {
+                                              if (!mine) Text(m.sender, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Accent)
+                                              if (m.deleted) {
+                                                  Text("\uD83D\uDEAB This message was deleted", fontStyle = FontStyle.Italic, color = Soft)
+                                              } else {
+                                                  if (m.replyTo != null) {
+                                                      val orig = msgs.firstOrNull { it.id == m.replyTo }
+                                                      Column(
+                                                          Modifier.padding(bottom = 4.dp).clip(RoundedCornerShape(8.dp))
+                                                              .background(Color(0x33000000)).padding(6.dp)
+                                                      ) {
+                                                          Text(orig?.sender ?: "Message", fontSize = 11.sp,
+                                                              fontWeight = FontWeight.Bold, color = Color(0xFFE6E0FF))
+                                                          Text(previewOf(orig), fontSize = 12.sp, color = Color(0xCCFFFFFF),
+                                                              maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                      }
+                                                  }
+                                                  if (m.image != null) {
+                                                      RemoteImage(m.image, Modifier.size(220.dp).clip(RoundedCornerShape(12.dp)))
+                                                      Spacer(Modifier.height(4.dp))
+                                                  }
+                                                  if (!m.body.isNullOrEmpty()) Text(m.body, fontSize = 16.sp)
+                                              }
+                                              Text(hhmm(m.at), fontSize = 10.sp, color = Color(0xB3FFFFFF),
+                                                  modifier = Modifier.align(Alignment.End))
                                           }
-                                          if (!m.body.isNullOrEmpty()) Text(m.body, fontSize = 16.sp)
-                                          Text(hhmm(m.at), fontSize = 10.sp, color = Color(0xB3FFFFFF),
-                                              modifier = Modifier.align(Alignment.End))
+                                          if (rx.isNotEmpty() && !m.deleted) ReactionRow(rx, session.uid) { e -> react(m, e) }
                                       }
                                   }
                               }
@@ -875,7 +1176,21 @@ jobs:
                   AnimatedVisibility(sending) {
                       Text("Uploading photo...", color = Soft, fontSize = 12.sp, modifier = Modifier.padding(start = 20.dp))
                   }
-                  // input bar
+                  AnimatedVisibility(replyTo != null) {
+                      val r = replyTo
+                      Row(
+                          Modifier.fillMaxWidth().padding(horizontal = 14.dp).clip(RoundedCornerShape(14.dp))
+                              .background(Glass).padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Column(Modifier.weight(1f)) {
+                              Text("Replying to " + (r?.sender ?: ""), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Accent)
+                              Text(previewOf(r), fontSize = 12.sp, color = Soft, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+                          Text("\u2715", fontSize = 16.sp, color = Soft,
+                              modifier = Modifier.clip(CircleShape).clickable { replyTo = null }.padding(10.dp))
+                      }
+                  }
                   Row(
                       Modifier.fillMaxWidth().padding(10.dp).clip(RoundedCornerShape(30.dp)).background(Glass)
                           .border(1.dp, GlassEdge, RoundedCornerShape(30.dp))
@@ -898,16 +1213,52 @@ jobs:
                       GradientButton("Send", enabled = text.isNotBlank()) {
                           val t = text.trim()
                           if (t.isNotEmpty()) {
+                              val rt = replyTo?.id
                               text = ""
+                              replyTo = null
                               scope.launch {
                                   try {
-                                      withContext(Dispatchers.IO) { api.send(room.id, session.name, t, null) }
+                                      withContext(Dispatchers.IO) { api.send(room.id, session.name, t, null, rt) }
                                       refresh()
                                   } catch (e: Exception) { error = e.message ?: "Send failed"; text = t }
                               }
                           }
                       }
                   }
+              }
+
+              val mm = menuMsg
+              if (mm != null) {
+                  AlertDialog(
+                      onDismissRequest = { menuMsg = null },
+                      containerColor = Color(0xFF1E1B3A),
+                      shape = RoundedCornerShape(24.dp),
+                      confirmButton = {},
+                      text = {
+                          Column {
+                              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                  EMOJIS.forEach { e ->
+                                      Text(e, fontSize = 24.sp,
+                                          modifier = Modifier.clip(CircleShape)
+                                              .clickable { menuMsg = null; react(mm, e) }.padding(5.dp))
+                                  }
+                              }
+                              Spacer(Modifier.height(10.dp))
+                              TextButton({ replyTo = mm; menuMsg = null }) { Text("Reply", color = Accent) }
+                              if (mm.senderId == session.uid) {
+                                  TextButton({
+                                      menuMsg = null
+                                      scope.launch {
+                                          try {
+                                              withContext(Dispatchers.IO) { api.deleteMessage(mm.id) }
+                                              refresh()
+                                          } catch (e: Exception) { error = e.message ?: "Delete failed" }
+                                      }
+                                  }) { Text("Delete", color = Danger) }
+                              }
+                          }
+                      }
+                  )
               }
 
               val v = viewer
